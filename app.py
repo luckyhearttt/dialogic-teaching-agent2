@@ -1,11 +1,7 @@
 import streamlit as st
 import requests
 import json
-import gspread
 import time
-import random
-from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
 
 # ==========================================
 # 1. 基础配置
@@ -30,7 +26,6 @@ st.markdown(hide_st_style, unsafe_allow_html=True)
 try:
     COZE_API_TOKEN = st.secrets["coze"]["api_token"]
     BOT_ID = st.secrets["coze"]["bot_id"]
-    SHEET_NAME = st.secrets["google"]["sheet_name"]
     CLASS_PASSWORD = st.secrets["auth"]["class_password"]
     SURVEY_1_LINK = st.secrets["links"]["survey_1"]
     SURVEY_2_LINK = st.secrets["links"]["survey_2"]
@@ -39,74 +34,34 @@ except:
     st.error("⚠️ Secrets not configured. Please contact your instructor.")
     st.stop()
 
+# ✏️【删除】不再需要 SHEET_NAME、Google Sheet 相关的 import 和配置
+
 WELCOME_MESSAGE = "Hi! I'm your AI assistant. You can ask me about anything, or let me help you brainstorm and refine your plan. Let's get started!"
 
 # ==========================================
 # 2. 数据库逻辑
 # ==========================================
 
-@st.cache_resource
-def get_google_sheet():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    try:
-        if "json_content" in st.secrets["gcp_service_account"]:
-            json_creds = json.loads(st.secrets["gcp_service_account"]["json_content"])
-        else:
-            json_creds = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
-        client = gspread.authorize(creds)
-        return client.open(SHEET_NAME).sheet1
-    except Exception as e:
-        st.error(f"⚠️ Unable to connect to database. Please contact your instructor. Error: {e}")
-        return None
-
-def save_to_sheet(sheet, user_name, role, content):
-    if not sheet:
-        return
-    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    for attempt in range(3):
-        try:
-            time.sleep(random.uniform(0.3, 0.8))
-            sheet.append_row([time_now, user_name, role, content])
-            return
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(2)
-            else:
-                st.toast(f"⚠️ Failed to save record, but your conversation is not affected. Details: {e}")
-
-def load_history_from_sheet(sheet, user_name):
-    if not sheet: return []
-    try:
-        all_records = sheet.get_all_values()
-        user_history = []
-        target_name = user_name.strip().lower()
-        for row in all_records[1:]:
-            if len(row) >= 4:
-                current_name = str(row[1]).strip().lower() if row[1] else ""
-                if current_name == target_name:
-                    role_map = {"Student": "user", "AI": "assistant"}
-                    role = role_map.get(row[2], "assistant")
-                    user_history.append({"role": role, "content": row[3]})
-        return user_history
-    except Exception as e:
-        st.error(f"⚠️ Unable to load history. Error: {e}")
-        return []
+# ✏️【全部删除】不再需要 get_google_sheet、save_to_sheet、load_history_from_sheet
+#   - 聊天记录存在 st.session_state 里（刷新会清空，但 Coze 后台有完整日志）
+#   - 删掉后每轮对话少了 1-2 秒延迟 + 两次可能失败的网络请求
 
 # ==========================================
 # 3. AI 核心逻辑
 # ==========================================
 
-# ✏️【修改】添加429重试保护
-def chat_with_coze(query, user_name):
+def stream_coze_response(query, user_name):
+    """
+    流式生成器：每收到一小块文字就立刻 yield 出去，
+    让 st.write_stream() 实时显示打字机效果。
+    """
     url = "https://api.coze.cn/v3/chat"
     headers = {"Authorization": f"Bearer {COZE_API_TOKEN}", "Content-Type": "application/json"}
     safe_user_id = f"stu_{user_name}".replace(" ", "_")
     
     context_messages = []
     if "messages" in st.session_state:
-        recent = st.session_state.messages[-14:]
+        recent = st.session_state.messages[-14:]  # 最近7轮对话作为上下文
         for msg in recent:
             context_messages.append({
                 "role": msg["role"],
@@ -124,16 +79,14 @@ def chat_with_coze(query, user_name):
         "bot_id": BOT_ID, 
         "user_id": safe_user_id, 
         "stream": True,
-        "auto_save_history": True,
+        "auto_save_history": True,  # ✏️【改回 True】现在 Coze 后台是唯一的数据记录源，必须开启
         "additional_messages": context_messages
     }
-    
-    full_content = ""
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, headers=headers, json=data, stream=True)
+            response = requests.post(url, headers=headers, json=data, stream=True, timeout=90)
             
             if response.status_code == 429:
                 wait_time = (attempt + 1) * 3
@@ -141,6 +94,7 @@ def chat_with_coze(query, user_name):
                 continue
             
             current_event = None
+            has_content = False
             
             for line in response.iter_lines():
                 if not line: continue
@@ -158,24 +112,36 @@ def chat_with_coze(query, user_name):
                         try:
                             chunk = json.loads(json_str)
                             if chunk.get('type') == 'answer':
-                                full_content += chunk.get('content', '')
+                                text_piece = chunk.get('content', '')
+                                if text_piece:
+                                    has_content = True
+                                    yield text_piece
                         except:
                             pass
                     
                     current_event = None
-                    
-            return full_content if full_content else "AI is thinking but didn't return a response..."
             
+            if not has_content:
+                yield "AI is thinking but didn't return a response. Please try again."
+            return
+            
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            yield "⏳ Response timed out. Please try sending your message again."
+            return
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2)
                 continue
-            return f"Connection error: {str(e)}"
+            yield f"Connection error. Please try again. ({str(e)})"
+            return
     
-    return "⏳ AI is currently busy. Please wait a moment and try again."
+    yield "⏳ AI is currently busy. Please wait a moment and try again."
 
 # ==========================================
-# 4. 知识库内容
+# 4. 知识库内容（不动）
 # ==========================================
 
 def render_knowledge_base():
@@ -313,7 +279,7 @@ Ask a student to explain another student's reasoning.
             st.markdown("")
 
 # ==========================================
-# 4b. 任务步骤页面
+# 4b. 任务步骤页面（不动）
 # ==========================================
 
 def render_task_page():
@@ -321,7 +287,6 @@ def render_task_page():
     st.markdown("Follow these three steps to complete today's activity.")
     st.divider()
 
-    # --- STEP 1 ---
     with st.expander("**Step 1: Pre-Survey** (Complete this first!)", expanded=True):
         st.markdown("""
 Before starting the task, please complete a short survey about your AI usage and dialogic teaching knowledge.
@@ -348,11 +313,11 @@ Before starting the task, please complete a short survey about your AI usage and
 
     st.markdown("")
 
-    # --- STEP 2 ---
     with st.expander("**Step 2: Design Task with AI** (Main activity — 40 min)", expanded=True):
-        # ✏️【修改】更新任务文案
         st.markdown("""
-Design a **5–10 minute lesson plan** for a classroom activity you may teach in the future. Please use **dialogic teaching** in your design. You may design and include the following:
+Design a **5–10 minute lesson plan** for a classroom activity you may teach in the future. Please use **dialogic teaching** in your design.
+
+You may design and include the following:
 
 1. 📋 **Lesson plan** — What will you teach? What learning objectives would you like to achieve?
 2. 📝 **Conduct plan** — How do you plan to conduct the lesson to achieve these objectives?
@@ -369,7 +334,6 @@ Design a **5–10 minute lesson plan** for a classroom activity you may teach in
 ---
 
 When you're done, click the button below to submit your work on the Moodle Discussion Forum.
-完成后，请点击下方按钮，在Moodle的Discussion Forum上提交你的设计。
 """)
         st.markdown(f"""
 <a href="{MOODLE_LINK}" target="_blank">
@@ -391,7 +355,6 @@ When you're done, click the button below to submit your work on the Moodle Discu
 
     st.markdown("")
 
-    # --- STEP 3 ---
     with st.expander("**Step 3: Post-Survey & Reflection** (After finishing the task)", expanded=True):
         st.markdown("""
 After completing your design task, please take a few minutes to reflect on your AI experience and fill in a short survey.
@@ -420,9 +383,7 @@ After completing your design task, please take a few minutes to reflect on your 
 # 5. 界面逻辑
 # ==========================================
 
-if "db_conn" not in st.session_state:
-    st.session_state.db_conn = get_google_sheet()
-
+# ✏️【删除】不再需要 db_conn
 if "current_page" not in st.session_state:
     st.session_state.current_page = "chat"
 
@@ -444,11 +405,8 @@ if 'user_name' not in st.session_state:
             if name_input and pwd_input == CLASS_PASSWORD:
                 clean_name = name_input.strip()
                 st.session_state.user_name = clean_name
-                with st.spinner("Connecting to AI assistant..."):
-                    history = load_history_from_sheet(st.session_state.db_conn, clean_name)
-                    st.session_state.messages = history
-                    if not history:
-                        st.session_state.messages.append({"role": "assistant", "content": WELCOME_MESSAGE})
+                # ✏️【简化】不再从 Sheet 加载历史，直接初始化空对话
+                st.session_state.messages = [{"role": "assistant", "content": WELCOME_MESSAGE}]
                 st.rerun()
             elif pwd_input != CLASS_PASSWORD:
                 st.error("🚫 Incorrect class code.")
@@ -481,13 +439,11 @@ with st.sidebar:
 
     st.divider()
 
-    # ✏️【修改】Tips emoji
     st.warning("""
-**💡 Tips for Using This Platform**
-
+**💡 Tips**
 1. **General AI** — This AI is not a dialogic teaching expert. Give it context when asking.
-2. **Keep your name** — Use the same link & name throughout, or history will be lost.
-3. **Be patient** — If no response, wait a moment. Don't refresh repeatedly.
+2. **Keep your name** — Use the same link & name throughout.
+3. **Be patient** — AI may take a few seconds to start responding. Don't refresh repeatedly.
 """)
 
     st.divider()
@@ -506,7 +462,7 @@ if st.session_state.current_page == "chat":
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # ✏️【修改】更稳妥的is_processing保护
+    # ✏️【核心改动】流式输出 + 去掉 Google Sheet 写入
     if prompt := st.chat_input("Type your message here..."):
         
         if st.session_state.is_processing:
@@ -515,19 +471,21 @@ if st.session_state.current_page == "chat":
         
         st.session_state.is_processing = True
         
+        # 1. 显示用户输入
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-        save_to_sheet(st.session_state.db_conn, st.session_state.user_name, "Student", prompt)
+        # ✏️【删除】不再 save_to_sheet
 
+        # 2. 流式显示AI回复（打字机效果）
         with st.chat_message("assistant"):
-            with st.spinner("🧠 AI is thinking..."):
-                response = chat_with_coze(prompt, st.session_state.user_name)
-                st.markdown(response)
+            response = st.write_stream(stream_coze_response(prompt, st.session_state.user_name))
         
+        # 3. 保存到 session（仅内存）
         st.session_state.messages.append({"role": "assistant", "content": response})
-        save_to_sheet(st.session_state.db_conn, st.session_state.user_name, "AI", response)
+        # ✏️【删除】不再 save_to_sheet
         
+        # 4. 重置
         st.session_state.is_processing = False
         st.rerun()
 
@@ -536,4 +494,5 @@ elif st.session_state.current_page == "task":
 
 elif st.session_state.current_page == "reference":
     render_knowledge_base()
+
 

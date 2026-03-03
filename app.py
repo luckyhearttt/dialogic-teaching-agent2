@@ -267,4 +267,3 @@ if prompt := st.chat_input("Type your message here...", disabled=st.session_stat
     # 4. 重置状态
     st.session_state.is_processing = False
     st.rerun()
-

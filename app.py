@@ -34,9 +34,7 @@ try:
     CLASS_PASSWORD = st.secrets["auth"]["class_password"]
     # ✏️【新增】四个跳转链接
     TASK_GUIDE_LINK = st.secrets["links"]["task_guide"]
-    SURVEY_1_LINK = st.secrets["links"]["survey_1"]
     MOODLE_LINK = st.secrets["links"]["moodle"]
-    REFLECTIVE_SURVEY_LINK = st.secrets["links"]["reflective_survey"]
 except:
     st.error("⚠️ Secrets not configured. Please contact your instructor.")
     st.stop()
@@ -215,10 +213,8 @@ with st.sidebar:
     # ✏️【新增】四个跳转按钮
     st.markdown("**📌 Quick Links**")
 
-    st.link_button("📖 Transcript & Reference", TASK_GUIDE_LINK, use_container_width=True)
-    st.link_button("📋 Submit Part 1 (Survey)", SURVEY_1_LINK, use_container_width=True)
-    st.link_button("📤 Submit Part 2 (Moodle)", MOODLE_LINK, use_container_width=True)
-    st.link_button("📝 Reflective Survey", REFLECTIVE_SURVEY_LINK, use_container_width=True)
+    st.link_button("📖 Reference", TASK_GUIDE_LINK, use_container_width=True)
+    st.link_button("📤 Moodle", MOODLE_LINK, use_container_width=True)
 
     st.divider()
 
